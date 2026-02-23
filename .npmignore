@@ -1,0 +1,10 @@
+.npmrc
+.gitignore
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+ROADMAP.md
+SECURITY.md
+tsconfig.json
+src
+.github

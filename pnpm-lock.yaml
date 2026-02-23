@@ -1,0 +1,47 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@briklab/lib':
+        specifier: ^3.0.1
+        version: 3.0.1
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+packages:
+
+  '@briklab/lib@3.0.1':
+    resolution: {integrity: sha512-o/z1QfgDeNTL8EGXkhgX53VDhjldk1C8ODn3dRl5mtALEZbJfAr4dJk55Bw354J+htPbE4jH0oYMcE4PYoJMBA==}
+
+  cssom@0.5.0:
+    resolution: {integrity: sha512-iKuQcq+NdHqlAcwUY0o/HL69XQrUaQdMjmStJ8JFmUaiiQErlhrmuigkg/CU4E2J0IyUKUrMAgl36TvN67MqTw==}
+
+  node-addon-api@8.5.0:
+    resolution: {integrity: sha512-/bRZty2mXUIFY/xU5HLvveNHlswNJej+RnxBjOMkidWfwZzgTbPG1E3K5TOxRLOR+5hX7bSofy8yf1hZevMS8A==}
+    engines: {node: ^18 || ^20 || >= 21}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+snapshots:
+
+  '@briklab/lib@3.0.1':
+    dependencies:
+      cssom: 0.5.0
+      node-addon-api: 8.5.0
+
+  cssom@0.5.0: {}
+
+  node-addon-api@8.5.0: {}
+
+  typescript@5.9.3: {}
