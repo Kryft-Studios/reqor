@@ -24,6 +24,7 @@ class Reqor {
         let a = await fetch(this.#url, {
             method: "GET",
         })
+
         // now create the wrapper
         let b: Reqor.Response = {
             raw: a,
@@ -38,10 +39,10 @@ namespace Reqor {
      * Error instance used by Reqor.
      */
     export class Error extends globalThis.Error {
-        constructor(message: string) {
+        constructor(message: string,sub?:string) {
             super(message);
-            this.name = "[reqor] Error"
-            this.stack = "at reqor [@briklab/reqor]"
+            this.name = `[reqor ${sub?`.${sub}`:""}] Error`
+            this.stack = `at reqor ${sub?`.${sub}`:""} [@briklab/reqor]`
         }
     }
     /**
@@ -85,13 +86,25 @@ namespace Reqor.Headers {
         */
         new?: (name: string, value?: any) => void | ((value: any) => void);
     }
-    export class Value {
-        #k:string
-        #v:string
-        constructor(k:string,v:string){
-            // initialize variables
-            this.#k = k; this.#v = v;
+    export function value(headers:globalThis.Headers,k:string,v?:any){
+        headers.append(k,v);
+        let d;
+        let func = (value?:any) => {
+            if(d)throw new Reqor.Error("Value is deleted and hence can not be used","Reqor.Headers.value")
+            if(value){headers.set(k,value);v=value;return func}
         }
+        func.toString = () => v;
+        func.valueOf = () => v
+        return new Proxy(func, {
+            get(target,property){
+                if(property==="delete"){
+                    if(d)throw new Reqor.Error("Value is deleted and hence can not be used","Reqor.Headers.value.delete")
+                    return ()=>{
+                        headers.delete(k);
+                    }
+                }
+            }
+        })
     }
 }
 namespace Reqor.Headers.Map {
