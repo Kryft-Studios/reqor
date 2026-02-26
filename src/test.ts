@@ -55,6 +55,27 @@ async function headersHelperExample() {
     console.log("[headers] cacheControl:", cacheControl.toString());
 }
 
+async function postExample() {
+    const response = assertImmediateResponse(
+        await reqor("https://jsonplaceholder.typicode.com/posts")
+            .retry(1)
+            .timeout(2000)
+            .post(
+                {
+                    title: "Reqor POST demo",
+                    body: "Testing Reqor post() with retries and timeout",
+                    userId: 1,
+                },
+                {
+                    params: [{ source: "reqor-test" }],
+                },
+            ),
+    );
+
+    console.log("[post] status:", response.status.toString(), "ok:", response.ok);
+    console.log("[post] response:", await response.json());
+}
+
 async function delayedFetchCancelExample() {
     const delayed = assertDelayedResponse(
         await reqor("https://jsonplaceholder.typicode.com/todos/3")
@@ -86,6 +107,7 @@ async function main() {
     await basicGetExample();
     await retryAndTimeoutExample();
     await headersHelperExample();
+    await postExample();
     await delayedFetchCancelExample();
     await delayedFetchActivationExample();
 }

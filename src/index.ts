@@ -21,7 +21,7 @@ function isArrayIndexKey(property: PropertyKey): property is string {
  */
 class Reqor {
     #url: string;
-     //#region GET
+    //#region GET
     #params: URLSearchParams;
     #retryConfig?: {
         number: number;
@@ -74,10 +74,10 @@ class Reqor {
                 };
                 return this;
             }
-        
+
     }
-    after(number:number){
-        if(number<0)return this;
+    after(number: number) {
+        if (number < 0) return this;
         this.#after = number
         return this;
     }
@@ -106,15 +106,8 @@ class Reqor {
      * ### THIS IS AN ASYNC FUNCTION
      * Send a response to the given URL
      */
-    async #get({ signal, url }: { signal?: AbortSignal; url?: string } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
-        const requestUrl = url ?? this.#buildUrl();
-        if (this.#after !== undefined) {
-            return this.#scheduleFetchLater(requestUrl, this.#after, signal);
-        }
-
-        const a = await this.#getViaFetchOrXhr(requestUrl, signal);
-
-         const b:Reqor.Response =  {
+    #toReqorResponse(a: globalThis.Response): Reqor.Response {
+        return {
             raw: a,
             headers: new Reqor.Headers(a.headers),
             ok: a.ok,
@@ -132,7 +125,16 @@ class Reqor {
             body: new Reqor.Body(a),
             bodyUsed: a.bodyUsed,
         };
-        return b;
+    }
+
+    async #get({ signal, url }: { signal?: AbortSignal; url?: string } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
+        const requestUrl = url ?? this.#buildUrl();
+        if (this.#after !== undefined) {
+            return this.#scheduleFetchLater(requestUrl, this.#after, signal, { method: "GET" }, "Reqor.get");
+        }
+
+        const a = await this.#requestViaFetch(requestUrl, { method: "GET", signal }, "Reqor.get");
+        return this.#toReqorResponse(a);
     }
 
     #resolveFetch(): ((input: string, init?: RequestInit) => Promise<globalThis.Response>) | undefined {
@@ -140,22 +142,22 @@ class Reqor {
         if (typeof maybeFetch !== "function") return undefined;
         return maybeFetch.bind(globalThis);
     }
-    #resolveFetchLater(){
+    #resolveFetchLater() {
         const maybeFetch = (globalThis as any).fetchLater;
         if (typeof maybeFetch !== "function") return undefined;
         return maybeFetch.bind(globalThis);
     }
 
-    async #getViaFetchOrXhr(requestUrl: string, signal?: AbortSignal): Promise<any> {
+    async #requestViaFetch(requestUrl: string, init: RequestInit, sub: "Reqor.get" | "Reqor.post"): Promise<globalThis.Response> {
         const fetchImpl = this.#resolveFetch();
         if (!fetchImpl) {
-            throw new Reqor.Error("fetch API not found in this runtime.", "Reqor.get");
+            throw new Reqor.Error("fetch API not found in this runtime.", sub);
         }
 
         try {
-            return await fetchImpl(requestUrl, { method: "GET", signal });
+            return await fetchImpl(requestUrl, init);
         } catch (err: any) {
-            throw new Reqor.Error(`fetch failed with Error "${JSON.stringify(err)}"`, "Reqor.get");
+            throw new Reqor.Error(`fetch failed with Error "${JSON.stringify(err)}"`, sub);
         }
     }
 
@@ -163,11 +165,13 @@ class Reqor {
         requestUrl: string,
         activateAfter: number,
         signal?: AbortSignal,
+        requestInit: RequestInit = { method: "GET" },
+        sub: "Reqor.get" | "Reqor.post" = "Reqor.get",
     ): Promise<Reqor.ResponseLater> {
         if (activateAfter < 0) {
             throw new Reqor.Error(
                 "fetchLater failed due to RangeError. This might be because you have put an negative number in Reqor.after",
-                "Reqor.get",
+                sub,
             );
         }
 
@@ -245,17 +249,17 @@ class Reqor {
         const fetchLaterImpl = this.#resolveFetchLater();
         if (fetchLaterImpl) {
             try {
-                nativeHandle = await fetchLaterImpl(requestUrl, { method: "GET", signal, activateAfter });
+                nativeHandle = await fetchLaterImpl(requestUrl, { ...requestInit, signal, activateAfter });
                 timer = setTimeout(() => {
                     if (completed) return;
                     activated = Boolean(nativeHandle?.activated ?? true);
                     finalizeResolve();
                 }, activateAfter);
             } catch (err: any) {
-                if (err instanceof globalThis.RangeError){
-                    throw new Reqor.Error(`fetchLater failed due to RangeError. This might be because you have put an negative number in Reqor.after`,"Reqor.get")
+                if (err instanceof globalThis.RangeError) {
+                    throw new Reqor.Error(`fetchLater failed due to RangeError. This might be because you have put an negative number in Reqor.after`, sub)
                 } else {
-                    throw new Reqor.Error(`fetchLater failed with Error "${JSON.stringify(err)}"`)
+                    throw new Reqor.Error(`fetchLater failed with Error "${JSON.stringify(err)}"`, sub)
                 }
             }
 
@@ -286,7 +290,11 @@ class Reqor {
                 }
             }
             try {
-                await this.#getViaFetchOrXhr(requestUrl, activeAbortController.signal);
+                await this.#requestViaFetch(
+                    requestUrl,
+                    { ...requestInit, signal: activeAbortController.signal },
+                    sub,
+                );
                 finalizeResolve();
             } catch (err: any) {
                 if (canceled || activeAbortController.signal.aborted) {
@@ -482,10 +490,217 @@ class Reqor {
     }
     //#endregion
     //#region POST
-    post(data:any){}
+    #_data: any
+    #cachedCt: undefined | string
+    data(data: any) {
+        this.#_data = data
+        this.#cachedCt = this.#identifyData(this.#_data)
+        return this;
+    }
 
-    #identifyData(){
+    #preparePostBody(data: any): { body?: BodyInit; headers?: HeadersInit } {
+        if (data === undefined || data === null) return {};
 
+        if (typeof FormData !== "undefined" && data instanceof FormData) {
+            return { body: data };
+        }
+        if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) {
+            return {
+                body: data,
+                headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+            };
+        }
+        if (typeof Blob !== "undefined" && data instanceof Blob) {
+            return {
+                body: data,
+                headers: data.type ? { "Content-Type": data.type } : undefined,
+            };
+        }
+        if (data instanceof ArrayBuffer) {
+            return {
+                body: data as unknown as BodyInit,
+                headers: { "Content-Type": "application/octet-stream" },
+            };
+        }
+        if (ArrayBuffer.isView(data)) {
+            const view = data as ArrayBufferView;
+            return {
+                body: view as unknown as BodyInit,
+                headers: { "Content-Type": "application/octet-stream" },
+            };
+        }
+        if (typeof data === "string") {
+            return {
+                body: data,
+                headers: { "Content-Type": this.#identifyData(data) },
+            };
+        }
+        if (typeof data === "object") {
+            return {
+                body: JSON.stringify(data),
+                headers: { "Content-Type": "application/json" },
+            };
+        }
+        return {
+            body: String(data),
+            headers: { "Content-Type": "text/plain" },
+        };
+    }
+
+    async #post({
+        signal,
+        url,
+        data,
+    }: {
+        signal?: AbortSignal;
+        url?: string;
+        data?: any;
+    } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
+        const requestUrl = url ?? this.#buildUrl();
+        const effectiveData = data ?? this.#_data;
+        const payload = this.#preparePostBody(effectiveData);
+        const requestInit: RequestInit = {
+            method: "POST",
+            signal,
+            body: payload.body,
+            headers: payload.headers,
+        };
+
+        if (this.#after !== undefined) {
+            return this.#scheduleFetchLater(requestUrl, this.#after, signal, requestInit, "Reqor.post");
+        }
+
+        const a = await this.#requestViaFetch(requestUrl, requestInit, "Reqor.post");
+        return this.#toReqorResponse(a);
+    }
+
+    async post(
+        data?: any,
+        {
+            retry,
+            timeout,
+            totalTimeout,
+            params,
+        }: {
+            retry?: {
+                number: number;
+                delay?: {
+                    number: number;
+                    increaseFn?: (current: number) => number;
+                };
+                onRetry?: (retryNumber?: number) => any;
+            };
+            timeout?: {
+                onTimeout?: (retryNumber?: number) => any;
+                time: number;
+            };
+            totalTimeout?: {
+                time: number;
+                onTimeout?: () => any;
+            };
+            params?: { [key: string]: string | number | boolean | null | undefined }[];
+        } = {},
+    ): Promise<Reqor.Response | Reqor.ResponseLater> {
+        const effectiveRetry = retry ?? this.#retryConfig;
+        const effectiveTimeout = timeout ?? this.#timeoutConfig;
+        const effectiveTotalTimeout = totalTimeout ?? this.#totalTimeoutConfig;
+        const requestUrl = this.#buildUrl(params);
+
+        if (this.#after !== undefined) {
+            if (effectiveTimeout) {
+                const controller = new AbortController();
+                const timer = setTimeout(() => {
+                    controller.abort();
+                    effectiveTimeout.onTimeout?.(0);
+                }, effectiveTimeout.time);
+                try {
+                    return await this.#post({ signal: controller.signal, url: requestUrl, data });
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            return this.#post({ url: requestUrl, data });
+        }
+
+        const maxRetries = effectiveRetry?.number ?? 0;
+        let retried = 0;
+        let current: Reqor.Response | undefined;
+        let lastError: any;
+        let delay = effectiveRetry?.delay?.number ?? 0;
+
+        const retryLoop = (async () => {
+            while (retried <= maxRetries) {
+                try {
+                    if (effectiveTimeout) {
+                        const controller = new AbortController();
+                        const timer = setTimeout(() => {
+                            controller.abort();
+                            effectiveTimeout.onTimeout?.(retried);
+                        }, effectiveTimeout.time);
+
+                        try {
+                            current = await this.#post({ signal: controller.signal, url: requestUrl, data }) as Reqor.Response;
+                        } finally {
+                            clearTimeout(timer);
+                        }
+                    } else {
+                        current = await this.#post({ url: requestUrl, data }) as Reqor.Response;
+                    }
+
+                    if (current?.ok) break;
+                } catch (err) {
+                    lastError = err;
+                }
+
+                retried++;
+                if (retried <= maxRetries) {
+                    const increaseFn = effectiveRetry?.delay?.increaseFn;
+                    if (increaseFn) {
+                        delay = increaseFn(delay);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    effectiveRetry?.onRetry?.(retried);
+                }
+            }
+
+            if (!current?.ok) {
+                throw lastError ?? new Reqor.Error("Failed after retries", "Reqor.post");
+            }
+            return current;
+        })();
+
+        if (effectiveTotalTimeout) {
+            const timeoutPromise = new Promise<never>((_, reject) => {
+                setTimeout(() => {
+                    effectiveTotalTimeout.onTimeout?.();
+                    reject(new Reqor.Error("Total timeout exceeded", "Reqor.post"));
+                }, effectiveTotalTimeout.time);
+            });
+
+            return Promise.race([retryLoop, timeoutPromise]);
+        }
+
+        return retryLoop;
+    }
+
+    #identifyData(data: any) {
+        if (!data) return "text/plain";
+        if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            return "application/octet-stream";
+        }
+        if (typeof Blob !== 'undefined' && data instanceof Blob) {
+            return data.type || "application/octet-stream";
+        }
+        let dataType = typeof data
+        if (dataType === "object") {
+            return "application/json";
+        }
+        if (dataType === "string") {
+            if (data.trim().startsWith("<")) return "text/html";
+            return "text/plain";
+        }
+
+        return "text/plain";
     }
     //#endregion
 }
@@ -509,7 +724,7 @@ namespace Reqor {
     //#endregion Main Error class
     //#region Response class
     export interface ResponseLater {
-        [key:string]:any;
+        [key: string]: any;
         /**
          * Whether the response activated or not
          */
@@ -1069,8 +1284,8 @@ namespace Reqor.Headers.HTTPHeaders {
             if (instance instanceof MIME_ARRAY) return true;
             return this.#isValidArray(instance)
         }
-        [Symbol.search](string:string){
-            return this.array.map(a=>a.toString()).indexOf(string);
+        [Symbol.search](string: string) {
+            return this.array.map(a => a.toString()).indexOf(string);
         }
         constructor(h: globalThis.Headers, key: string, defaultVal: string = "text/plain") {
             this._h = h;
