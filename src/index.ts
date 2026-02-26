@@ -7,12 +7,21 @@ JSTC.addCustomHandler("checkurl", (string: any) => {
 });
 //#endregion Defining JSTC handler
 
+const REQOR_ARRAY_INDEX_GET = Symbol("reqor.arrayIndexGet");
+const REQOR_ARRAY_INDEX_SET = Symbol("reqor.arrayIndexSet");
+const REQOR_ARRAY_LENGTH_GET = Symbol("reqor.arrayLengthGet");
+
+function isArrayIndexKey(property: PropertyKey): property is string {
+    return typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property);
+}
+
 //#region The main reqor class
 /**
  * The main class for Reqor.
  */
 class Reqor {
     #url: string;
+     //#region GET
     #params: URLSearchParams;
     #retryConfig?: {
         number: number;
@@ -30,6 +39,7 @@ class Reqor {
         time: number;
         onTimeout?: () => any;
     };
+    #after?: number;
 
     readonly timeout: (ms: number) => Reqor;
     readonly retry: (count: number) => Reqor;
@@ -64,7 +74,12 @@ class Reqor {
                 };
                 return this;
             }
-
+        
+    }
+    after(number:number){
+        if(number<0)return this;
+        this.#after = number
+        return this;
     }
 
     #buildUrl(extraParams?: { [key: string]: string | number | boolean | null | undefined }[]) {
@@ -91,14 +106,15 @@ class Reqor {
      * ### THIS IS AN ASYNC FUNCTION
      * Send a response to the given URL
      */
-    async #get({ signal, url }: { signal?: AbortSignal; url?: string } = {}) {
-        if (typeof fetch !== "function") {
-            throw new Reqor.Error("fetch API not found.");
+    async #get({ signal, url }: { signal?: AbortSignal; url?: string } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
+        const requestUrl = url ?? this.#buildUrl();
+        if (this.#after !== undefined) {
+            return this.#scheduleFetchLater(requestUrl, this.#after, signal);
         }
 
-        const a = await fetch(url ?? this.#buildUrl(), { method: "GET", signal });
+        const a = await this.#getViaFetchOrXhr(requestUrl, signal);
 
-        const b: Reqor.Response = {
+         const b:Reqor.Response =  {
             raw: a,
             headers: new Reqor.Headers(a.headers),
             ok: a.ok,
@@ -112,18 +128,185 @@ class Reqor {
             arrayBuffer: a.arrayBuffer.bind(a),
             blob: a.blob.bind(a),
             formData: a.formData.bind(a),
-            toJson: a.json.bind(a),
-            toText: a.text.bind(a),
-            toArrayBuffer: a.arrayBuffer.bind(a),
-            toBlob: a.blob.bind(a),
-            toFormData: a.formData.bind(a),
             clone: a.clone.bind(a),
-            copy: a.clone.bind(a),
             body: new Reqor.Body(a),
             bodyUsed: a.bodyUsed,
         };
-
         return b;
+    }
+
+    #resolveFetch(): ((input: string, init?: RequestInit) => Promise<globalThis.Response>) | undefined {
+        const maybeFetch = (globalThis as any).fetch;
+        if (typeof maybeFetch !== "function") return undefined;
+        return maybeFetch.bind(globalThis);
+    }
+    #resolveFetchLater(){
+        const maybeFetch = (globalThis as any).fetchLater;
+        if (typeof maybeFetch !== "function") return undefined;
+        return maybeFetch.bind(globalThis);
+    }
+
+    async #getViaFetchOrXhr(requestUrl: string, signal?: AbortSignal): Promise<any> {
+        const fetchImpl = this.#resolveFetch();
+        if (!fetchImpl) {
+            throw new Reqor.Error("fetch API not found in this runtime.", "Reqor.get");
+        }
+
+        try {
+            return await fetchImpl(requestUrl, { method: "GET", signal });
+        } catch (err: any) {
+            throw new Reqor.Error(`fetch failed with Error "${JSON.stringify(err)}"`, "Reqor.get");
+        }
+    }
+
+    async #scheduleFetchLater(
+        requestUrl: string,
+        activateAfter: number,
+        signal?: AbortSignal,
+    ): Promise<Reqor.ResponseLater> {
+        if (activateAfter < 0) {
+            throw new Reqor.Error(
+                "fetchLater failed due to RangeError. This might be because you have put an negative number in Reqor.after",
+                "Reqor.get",
+            );
+        }
+
+        let activated = false;
+        let canceled = false;
+        let completed = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let activeAbortController: AbortController | undefined;
+        let nativeHandle: any;
+
+        let resolveDone!: () => void;
+        let rejectDone!: (reason?: any) => void;
+        const done = new Promise<void>((resolve, reject) => {
+            resolveDone = resolve;
+            rejectDone = reject;
+        });
+
+        const finalizeResolve = () => {
+            if (completed) return;
+            completed = true;
+            if (signal) {
+                signal.removeEventListener("abort", onAbort);
+            }
+            resolveDone();
+        };
+
+        const finalizeReject = (reason: any) => {
+            if (completed) return;
+            completed = true;
+            if (signal) {
+                signal.removeEventListener("abort", onAbort);
+            }
+            rejectDone(reason);
+        };
+
+        const cancel = () => {
+            if (completed) return false;
+            canceled = true;
+            if (timer) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+            if (typeof nativeHandle?.cancel === "function") {
+                try {
+                    nativeHandle.cancel();
+                } catch {
+                }
+            }
+            activeAbortController?.abort();
+            finalizeResolve();
+            return true;
+        };
+
+        const onAbort = () => {
+            cancel();
+        };
+
+        if (signal) {
+            if (signal.aborted) {
+                cancel();
+                return {
+                    get activated() {
+                        return activated || Boolean(nativeHandle?.activated);
+                    },
+                    get canceled() {
+                        return canceled;
+                    },
+                    cancel,
+                    done,
+                };
+            }
+            signal.addEventListener("abort", onAbort, { once: true });
+        }
+
+        const fetchLaterImpl = this.#resolveFetchLater();
+        if (fetchLaterImpl) {
+            try {
+                nativeHandle = await fetchLaterImpl(requestUrl, { method: "GET", signal, activateAfter });
+                timer = setTimeout(() => {
+                    if (completed) return;
+                    activated = Boolean(nativeHandle?.activated ?? true);
+                    finalizeResolve();
+                }, activateAfter);
+            } catch (err: any) {
+                if (err instanceof globalThis.RangeError){
+                    throw new Reqor.Error(`fetchLater failed due to RangeError. This might be because you have put an negative number in Reqor.after`,"Reqor.get")
+                } else {
+                    throw new Reqor.Error(`fetchLater failed with Error "${JSON.stringify(err)}"`)
+                }
+            }
+
+            return {
+                get activated() {
+                    return activated || Boolean(nativeHandle?.activated);
+                },
+                get canceled() {
+                    return canceled;
+                },
+                cancel,
+                done,
+            };
+        }
+
+        timer = setTimeout(async () => {
+            if (completed || canceled) {
+                finalizeResolve();
+                return;
+            }
+            activated = true;
+            activeAbortController = new AbortController();
+            if (signal) {
+                if (signal.aborted) {
+                    activeAbortController.abort();
+                } else {
+                    signal.addEventListener("abort", () => activeAbortController?.abort(), { once: true });
+                }
+            }
+            try {
+                await this.#getViaFetchOrXhr(requestUrl, activeAbortController.signal);
+                finalizeResolve();
+            } catch (err: any) {
+                if (canceled || activeAbortController.signal.aborted) {
+                    finalizeResolve();
+                    return;
+                }
+                finalizeReject(err);
+            }
+        }, activateAfter);
+
+        return {
+            get activated() {
+                return activated;
+            },
+            get canceled() {
+                return canceled;
+            },
+            cancel,
+            done,
+        };
     }
 
     params(
@@ -214,11 +397,28 @@ class Reqor {
             onTimeout?: () => any;
         };
         params?: { [key: string]: string | number | boolean | null | undefined }[]
-    } = {}) {
+    } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
         const effectiveRetry = retry ?? this.#retryConfig;
         const effectiveTimeout = timeout ?? this.#timeoutConfig;
         const effectiveTotalTimeout = totalTimeout ?? this.#totalTimeoutConfig;
         const requestUrl = this.#buildUrl(params);
+
+        if (this.#after !== undefined) {
+            if (effectiveTimeout) {
+                const controller = new AbortController();
+                const timer = setTimeout(() => {
+                    controller.abort();
+                    effectiveTimeout.onTimeout?.(0);
+                }, effectiveTimeout.time);
+                try {
+                    return await this.#get({ signal: controller.signal, url: requestUrl });
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            return this.#get({ url: requestUrl });
+        }
+
         const maxRetries = effectiveRetry?.number ?? 0;
 
         let retried = 0;
@@ -237,12 +437,12 @@ class Reqor {
                         }, effectiveTimeout.time);
 
                         try {
-                            current = await this.#get({ signal: controller.signal, url: requestUrl });
+                            current = await this.#get({ signal: controller.signal, url: requestUrl }) as Reqor.Response;
                         } finally {
                             clearTimeout(timer);
                         }
                     } else {
-                        current = await this.#get({ url: requestUrl });
+                        current = await this.#get({ url: requestUrl }) as Reqor.Response;
                     }
 
                     if (current?.ok) break;
@@ -280,7 +480,14 @@ class Reqor {
 
         return retryLoop;
     }
+    //#endregion
+    //#region POST
+    post(data:any){}
 
+    #identifyData(){
+
+    }
+    //#endregion
 }
 
 
@@ -293,12 +500,34 @@ namespace Reqor {
     export class Error extends globalThis.Error {
         constructor(message: string, sub?: string) {
             super(message);
-            this.name = `[reqor ${sub ? `.${sub}` : ""}] Error`;
-            this.stack = `at reqor ${sub ? `.${sub}` : ""} [@briklab/reqor]`;
+            this.name = `reqor ${sub ? `.${sub}` : ""}`;
+            if (typeof (globalThis as any).Error?.captureStackTrace === "function") {
+                (globalThis as any).Error.captureStackTrace(this, Reqor.Error);
+            }
         }
     }
     //#endregion Main Error class
     //#region Response class
+    export interface ResponseLater {
+        [key:string]:any;
+        /**
+         * Whether the response activated or not
+         */
+        activated: boolean;
+        /**
+         * Whether the delayed request has been canceled.
+         */
+        canceled: boolean;
+        /**
+         * Cancels the delayed request before/during activation.
+         * Returns true when cancellation was applied.
+         */
+        cancel: () => boolean;
+        /**
+         * Resolves when delayed request scheduling completes.
+         */
+        done: Promise<void>;
+    }
     /**
      * Response returned by **reqor**.
      */
@@ -773,6 +1002,7 @@ namespace Reqor.Headers.HTTPHeaders {
         protected _h: globalThis.Headers;
         protected _key: string;
 
+
         constructor(h: globalThis.Headers, key: string, defaultVal: string = "text/plain") {
             this._h = h;
             this._key = key;
@@ -800,6 +1030,12 @@ namespace Reqor.Headers.HTTPHeaders {
             return this;
         }
 
+        [Symbol.hasInstance](instance: any) {
+            if (instance instanceof MIME) return true
+            let b = instance.split("/");
+            const isValidBase = (HTTPHeaders.ContentType.validBases as readonly string[]).includes(b[0]);
+            return isValidBase;
+        }
         toString() { return this._value; }
         valueOf() { return this._value; }
         [Symbol.toPrimitive](hint: string) {
@@ -813,6 +1049,29 @@ namespace Reqor.Headers.HTTPHeaders {
         protected _h: globalThis.Headers;
         protected _key: string;
 
+        get length() {
+            return this.array.length;
+        }
+        #isValidArray(arr: string[] | string) {
+            const parts = Array.isArray(arr) ? arr : arr.split(",");
+
+            for (let i = 0; i < parts.length; i++) {
+                let v = parts[i];
+                let b = v.split("/");
+
+                const isValidBase = (HTTPHeaders.ContentType.validBases as readonly string[]).includes(b[0]);
+
+                if (isValidBase) return true;
+            }
+            return false;
+        }
+        [Symbol.hasInstance](instance: any) {
+            if (instance instanceof MIME_ARRAY) return true;
+            return this.#isValidArray(instance)
+        }
+        [Symbol.search](string:string){
+            return this.array.map(a=>a.toString()).indexOf(string);
+        }
         constructor(h: globalThis.Headers, key: string, defaultVal: string = "text/plain") {
             this._h = h;
             this._key = key;
@@ -837,6 +1096,26 @@ namespace Reqor.Headers.HTTPHeaders {
             this._h.set(this._key, this._value);
         }
 
+        at(index: number) {
+            const arr = this.array;
+            const normalized = index < 0 ? arr.length + index : index;
+            return arr[normalized];
+        }
+
+        [REQOR_ARRAY_LENGTH_GET]() {
+            return this.length;
+        }
+
+        [REQOR_ARRAY_INDEX_GET](index: number) {
+            return this.array[index];
+        }
+
+        [REQOR_ARRAY_INDEX_SET](index: number, value: MIME | string) {
+            const arr = this.array.map((v) => v.toString());
+            arr[index] = value instanceof MIME ? value.toString() : String(value);
+            this.set(arr);
+        }
+
         toString() { return this._value; }
         valueOf() { return this._value; }
         [Symbol.toPrimitive](hint: string) {
@@ -850,6 +1129,8 @@ namespace Reqor.Headers.HTTPHeaders {
         async *[Symbol.asyncIterator](): AsyncIterableIterator<MIME> {
             for (const item of this.array) yield item;
         }
+        get [Symbol.toStringTag]() { return "Array"; }
+        get [Symbol.unscopables]() { return (Array.prototype as any)[Symbol.unscopables] ?? {}; }
     }
 
     class VALID_STRING {
@@ -964,6 +1245,22 @@ namespace Reqor.Headers.HTTPHeaders {
             this.#h.set(this.#key, this.toString());
         }
 
+        at(index: number) {
+            const normalized = index < 0 ? this.#items.length + index : index;
+            return this.#items[normalized];
+        }
+        get length() { return this.#items.length; }
+        [REQOR_ARRAY_LENGTH_GET]() { return this.#items.length; }
+        [REQOR_ARRAY_INDEX_GET](index: number) { return this.#items[index]; }
+        [REQOR_ARRAY_INDEX_SET](index: number, value: number) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) {
+                throw new Reqor.Error(`Invalid number "${value}" for header "${this.#key}"`, "Reqor.Headers.HTTPHeaders");
+            }
+            this.#items[index] = n;
+            this.#h.set(this.#key, this.toString());
+        }
+
         get array() { return [...this.#items]; }
         valueOf() { return this.#items.join(","); }
         toString() { return this.#items.join(","); }
@@ -978,6 +1275,8 @@ namespace Reqor.Headers.HTTPHeaders {
         async *[Symbol.asyncIterator](): AsyncIterableIterator<number> {
             for (const item of this.array) yield item;
         }
+        get [Symbol.toStringTag]() { return "Array"; }
+        get [Symbol.unscopables]() { return (Array.prototype as any)[Symbol.unscopables] ?? {}; }
     }
 
     class ANY_STRING_ARRAY {
@@ -1014,6 +1313,18 @@ namespace Reqor.Headers.HTTPHeaders {
             this.#h.set(this.#key, this.toString());
         }
 
+        at(index: number) {
+            const normalized = index < 0 ? this.#items.length + index : index;
+            return this.#items[normalized];
+        }
+        get length() { return this.#items.length; }
+        [REQOR_ARRAY_LENGTH_GET]() { return this.#items.length; }
+        [REQOR_ARRAY_INDEX_GET](index: number) { return this.#items[index]; }
+        [REQOR_ARRAY_INDEX_SET](index: number, value: string) {
+            this.#items[index] = String(value);
+            this.#h.set(this.#key, this.toString());
+        }
+
         get array() { return [...this.#items]; }
 
         valueOf() { return this.#items.join(","); }
@@ -1029,6 +1340,8 @@ namespace Reqor.Headers.HTTPHeaders {
         async *[Symbol.asyncIterator](): AsyncIterableIterator<string> {
             for (const item of this.array) yield item;
         }
+        get [Symbol.toStringTag]() { return "Array"; }
+        get [Symbol.unscopables]() { return (Array.prototype as any)[Symbol.unscopables] ?? {}; }
     }
 
     class STRING_BOOL extends VALID_STRING {
@@ -1076,6 +1389,20 @@ namespace Reqor.Headers.HTTPHeaders {
             this.#h.set(this.#key, this.toString());
         }
 
+        at(index: number) {
+            const arr = this.array;
+            const normalized = index < 0 ? arr.length + index : index;
+            return arr[normalized];
+        }
+        get length() { return this.#items.length; }
+        [REQOR_ARRAY_LENGTH_GET]() { return this.#items.length; }
+        [REQOR_ARRAY_INDEX_GET](index: number) { return this.array[index]; }
+        [REQOR_ARRAY_INDEX_SET](index: number, value: string) {
+            const next = this.array;
+            next[index] = String(value);
+            this.set(next);
+        }
+
         get array() { return this.#items.map((v) => v.toString()); }
         valueOf() { return this.#items.map((v) => v.toString()).join(","); }
         toString() { return this.#items.map((v) => v.toString()).join(","); }
@@ -1090,6 +1417,8 @@ namespace Reqor.Headers.HTTPHeaders {
         async *[Symbol.asyncIterator](): AsyncIterableIterator<string> {
             for (const item of this.array) yield item;
         }
+        get [Symbol.toStringTag]() { return "Array"; }
+        get [Symbol.unscopables]() { return (Array.prototype as any)[Symbol.unscopables] ?? {}; }
     }
 
     class STRING_BOOL_ARRAY extends VALID_STRING_ARRAY {
@@ -1275,6 +1604,12 @@ function createCallableObject<T extends object>(
 
     return new Proxy(fn as any, {
         get(innerTarget, property, receiver) {
+            if (property === "length" && typeof (target as any)?.[REQOR_ARRAY_LENGTH_GET] === "function") {
+                return (target as any)[REQOR_ARRAY_LENGTH_GET]();
+            }
+            if (isArrayIndexKey(property) && typeof (target as any)?.[REQOR_ARRAY_INDEX_GET] === "function") {
+                return (target as any)[REQOR_ARRAY_INDEX_GET](Number(property));
+            }
             if (property in target) {
                 const value = (target as any)[property];
                 return typeof value === "function" ? value.bind(target) : value;
@@ -1282,6 +1617,10 @@ function createCallableObject<T extends object>(
             return Reflect.get(innerTarget, property, receiver);
         },
         set(innerTarget, property, value, receiver) {
+            if (isArrayIndexKey(property) && typeof (target as any)?.[REQOR_ARRAY_INDEX_SET] === "function") {
+                (target as any)[REQOR_ARRAY_INDEX_SET](Number(property), value);
+                return true;
+            }
             if (property in target) {
                 (target as any)[property] = value;
                 return true;
@@ -1289,12 +1628,46 @@ function createCallableObject<T extends object>(
             return Reflect.set(innerTarget, property, value, receiver);
         },
         has(innerTarget, property) {
+            if (property === "length" && typeof (target as any)?.[REQOR_ARRAY_LENGTH_GET] === "function") {
+                return true;
+            }
+            if (isArrayIndexKey(property) && typeof (target as any)?.[REQOR_ARRAY_LENGTH_GET] === "function") {
+                return Number(property) < (target as any)[REQOR_ARRAY_LENGTH_GET]();
+            }
             return property in target || Reflect.has(innerTarget, property);
         },
         ownKeys(innerTarget) {
-            return Array.from(new Set([...Reflect.ownKeys(innerTarget), ...Reflect.ownKeys(target as any)]));
+            const keys = [...Reflect.ownKeys(innerTarget), ...Reflect.ownKeys(target as any)];
+            if (typeof (target as any)?.[REQOR_ARRAY_LENGTH_GET] === "function") {
+                const len = (target as any)[REQOR_ARRAY_LENGTH_GET]();
+                keys.push("length");
+                for (let i = 0; i < len; i++) keys.push(String(i));
+            }
+            return Array.from(new Set(keys));
         },
         getOwnPropertyDescriptor(innerTarget, property) {
+            if (property === "length" && typeof (target as any)?.[REQOR_ARRAY_LENGTH_GET] === "function") {
+                return {
+                    configurable: true,
+                    enumerable: false,
+                    writable: false,
+                    value: (target as any)[REQOR_ARRAY_LENGTH_GET](),
+                };
+            }
+            if (isArrayIndexKey(property) && typeof (target as any)?.[REQOR_ARRAY_LENGTH_GET] === "function") {
+                const idx = Number(property);
+                const len = (target as any)[REQOR_ARRAY_LENGTH_GET]();
+                if (idx < len) {
+                    return {
+                        configurable: true,
+                        enumerable: true,
+                        writable: true,
+                        value: typeof (target as any)?.[REQOR_ARRAY_INDEX_GET] === "function"
+                            ? (target as any)[REQOR_ARRAY_INDEX_GET](idx)
+                            : undefined,
+                    };
+                }
+            }
             return (
                 Reflect.getOwnPropertyDescriptor(target as any, property)
                 ?? Reflect.getOwnPropertyDescriptor(innerTarget, property)
@@ -1313,7 +1686,7 @@ namespace Reqor.Headers.HTTPHeaders.ContentType {
  * @param url
  * @returns
  */
-function reqor(url: string) {
+export default function reqor(url: string) {
     if (!JSTC.for([url]).check(["checkurl"]))
         throw new Reqor.Error("Invalid URL");
     return new Reqor(url);
