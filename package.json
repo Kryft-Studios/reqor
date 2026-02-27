@@ -1,12 +1,19 @@
 {
   "name": "@briklab/reqor",
-  "version": "1.0.0",
+  "version": "0.5.0",
   "description": "A tiny wrapper for the web's fetch and websockets.",
   "main": "./dist/index.js",
   "type": "module",
+  "exports" : {
+    ".": {
+      "import":"./dist/index.js",
+      "types":"./dist/index.d.ts"
+    }
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "pnpm build"
   },
   "keywords": [],
   "author": {
