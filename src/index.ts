@@ -11,34 +11,162 @@ const REQOR_ARRAY_INDEX_GET = Symbol("reqor.arrayIndexGet");
 const REQOR_ARRAY_INDEX_SET = Symbol("reqor.arrayIndexSet");
 const REQOR_ARRAY_LENGTH_GET = Symbol("reqor.arrayLengthGet");
 
+type ReqorRetryConfig = {
+    number: number;
+    delay?: {
+        number: number;
+        increaseFn?: (current: number) => number;
+    };
+    onRetry?: (retryNumber?: number) => any;
+};
+
+type ReqorTimeoutConfig = {
+    onTimeout?: (retryNumber?: number) => any;
+    time: number;
+};
+
+type ReqorTotalTimeoutConfig = {
+    time: number;
+    onTimeout?: () => any;
+};
+
+type ReqorSub = "Reqor.get" | "Reqor.post";
+type ReqorMiddlewareContext = {
+    url: string;
+    init: RequestInit;
+    sub: ReqorSub;
+};
+type ReqorMiddleware = {
+    before?: (
+        context: ReqorMiddlewareContext,
+    ) => void | Partial<Pick<ReqorMiddlewareContext, "url" | "init">> | Promise<void | Partial<Pick<ReqorMiddlewareContext, "url" | "init">>>;
+    after?: (response: Reqor.Response, context: ReqorMiddlewareContext) => void | Reqor.Response | Promise<void | Reqor.Response>;
+    onError?: (error: any, context: ReqorMiddlewareContext) => void | any | Promise<void | any>;
+};
+type ReqorLocalMiddlewareInput = ReqorMiddleware | ReqorMiddleware[];
+type ReqorGetOptions = {
+    retry?: ReqorRetryConfig;
+    timeout?: ReqorTimeoutConfig;
+    totalTimeout?: ReqorTotalTimeoutConfig;
+    params?: { [key: string]: string | number | boolean | null | undefined }[];
+    middleware?: ReqorLocalMiddlewareInput;
+};
+type ReqorPostOptions = ReqorGetOptions;
+
+function isReqorMiddleware(value: unknown): value is ReqorMiddleware {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const candidate = value as Record<string, unknown>;
+    return (
+        typeof candidate.before === "function"
+        || typeof candidate.after === "function"
+        || typeof candidate.onError === "function"
+    );
+}
+
+function normalizeLocalMiddleware(input?: ReqorLocalMiddlewareInput): ReqorMiddleware[] | undefined {
+    if (!input) return undefined;
+    const list = Array.isArray(input) ? input : [input];
+    return list.filter(isReqorMiddleware);
+}
+
+function normalizeGetOptions(input?: ReqorGetOptions | ReqorLocalMiddlewareInput): ReqorGetOptions {
+    if (!input) return {};
+    if (Array.isArray(input)) return { middleware: input };
+    if (isReqorMiddleware(input)) return { middleware: input };
+    return input;
+}
+
+function normalizePostOptions(input?: ReqorPostOptions | ReqorLocalMiddlewareInput): ReqorPostOptions {
+    if (!input) return {};
+    if (Array.isArray(input)) return { middleware: input };
+    if (isReqorMiddleware(input)) return { middleware: input };
+    return input;
+}
+
 function isArrayIndexKey(property: PropertyKey): property is string {
     return typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property);
 }
-
 //#region The main reqor class
 /**
  * The main class for Reqor.
  */
 class Reqor {
     #url: string;
+    //#region Middle Ware
+    static use(middleware: ReqorMiddleware) {
+        this.middlewares.push(middleware);
+        return this;
+    }
+    static clearMiddlewares() {
+        this.middlewares = [];
+    }
+    static middlewares: ReqorMiddleware[] = [];
+    #middlewares: ReqorMiddleware[] = [];
+    use(middleware: ReqorMiddleware) {
+        this.#middlewares.push(middleware);
+        return this;
+    }
+    clearMiddlewares() {
+        this.#middlewares = [];
+        return this;
+    }
+    #getMiddlewares(localMiddlewares?: ReqorMiddleware[]) {
+        return [...Reqor.middlewares, ...this.#middlewares, ...(localMiddlewares ?? [])];
+    }
+
+    async #applyBeforeMiddlewares(context: ReqorMiddlewareContext, localMiddlewares?: ReqorMiddleware[]): Promise<ReqorMiddlewareContext> {
+        let current = context;
+        for (const middleware of this.#getMiddlewares(localMiddlewares)) {
+            const result = await middleware.before?.(current);
+            if (!result) continue;
+            current = {
+                ...current,
+                ...result,
+                init: result.init ? { ...current.init, ...result.init } : current.init,
+            };
+        }
+        return current;
+    }
+
+    async #applyAfterMiddlewares(
+        response: Reqor.Response,
+        context: ReqorMiddlewareContext,
+        localMiddlewares?: ReqorMiddleware[],
+    ): Promise<Reqor.Response> {
+        let current = response;
+        for (const middleware of this.#getMiddlewares(localMiddlewares)) {
+            const result = await middleware.after?.(current, context);
+            if (result) {
+                current = result;
+            }
+        }
+        return current;
+    }
+
+    async #applyErrorMiddlewares(
+        error: any,
+        context: ReqorMiddlewareContext,
+        localMiddlewares?: ReqorMiddleware[],
+    ): Promise<any> {
+        let currentError = error;
+        for (const middleware of this.#getMiddlewares(localMiddlewares)) {
+            const result = await middleware.onError?.(currentError, context);
+            if (result !== undefined) {
+                currentError = result;
+            }
+        }
+        return currentError;
+    }
+    //#endregion
     //#region GET
     #params: URLSearchParams;
     #retryConfig?: {
-        number: number;
-        delay?: {
-            number: number;
-            increaseFn?: (current: number) => number;
-        };
-        onRetry?: (retryNumber?: number) => any;
+        number: ReqorRetryConfig["number"];
+        delay?: ReqorRetryConfig["delay"];
+        onRetry?: ReqorRetryConfig["onRetry"];
     };
-    #timeoutConfig?: {
-        onTimeout?: (retryNumber?: number) => any;
-        time: number;
-    };
-    #totalTimeoutConfig?: {
-        time: number;
-        onTimeout?: () => any;
-    };
+    #timeoutConfig?: ReqorTimeoutConfig;
+    #totalTimeoutConfig?: ReqorTotalTimeoutConfig;
     #after?: number;
 
     readonly timeout: (ms: number) => Reqor;
@@ -127,14 +255,158 @@ class Reqor {
         };
     }
 
-    async #get({ signal, url }: { signal?: AbortSignal; url?: string } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
+    async #dispatchRequest({
+        signal,
+        url,
+        init,
+        sub,
+        localMiddlewares,
+    }: {
+        signal?: AbortSignal;
+        url?: string;
+        init: RequestInit;
+        sub: ReqorSub;
+        localMiddlewares?: ReqorMiddleware[];
+    }): Promise<Reqor.Response | Reqor.ResponseLater> {
         const requestUrl = url ?? this.#buildUrl();
+        const baseContext: ReqorMiddlewareContext = {
+            url: requestUrl,
+            init: { ...init, signal },
+            sub,
+        };
+        const middlewareContext = await this.#applyBeforeMiddlewares(baseContext, localMiddlewares);
+
         if (this.#after !== undefined) {
-            return this.#scheduleFetchLater(requestUrl, this.#after, signal, { method: "GET" }, "Reqor.get");
+            try {
+                return await this.#scheduleFetchLater(
+                    middlewareContext.url,
+                    this.#after,
+                    middlewareContext.init.signal as AbortSignal | undefined,
+                    middlewareContext.init,
+                    sub,
+                    middlewareContext,
+                    localMiddlewares,
+                );
+            } catch (err: any) {
+                throw await this.#applyErrorMiddlewares(err, middlewareContext, localMiddlewares);
+            }
         }
 
-        const a = await this.#requestViaFetch(requestUrl, { method: "GET", signal }, "Reqor.get");
-        return this.#toReqorResponse(a);
+        try {
+            const a = await this.#requestViaFetch(middlewareContext.url, middlewareContext.init, sub);
+            const response = this.#toReqorResponse(a);
+            return this.#applyAfterMiddlewares(response, middlewareContext, localMiddlewares);
+        } catch (err: any) {
+            throw await this.#applyErrorMiddlewares(err, middlewareContext, localMiddlewares);
+        }
+    }
+
+    async #executeWithPolicies(
+        {
+            retry,
+            timeout,
+            totalTimeout,
+        }: {
+            retry?: ReqorRetryConfig;
+            timeout?: ReqorTimeoutConfig;
+            totalTimeout?: ReqorTotalTimeoutConfig;
+        },
+        sub: "Reqor.get" | "Reqor.post",
+        attemptRequest: (signal?: AbortSignal) => Promise<Reqor.Response | Reqor.ResponseLater>,
+    ): Promise<Reqor.Response | Reqor.ResponseLater> {
+        if (this.#after !== undefined) {
+            if (timeout) {
+                const controller = new AbortController();
+                const timer = setTimeout(() => {
+                    controller.abort();
+                    timeout.onTimeout?.(0);
+                }, timeout.time);
+                try {
+                    return await attemptRequest(controller.signal);
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            return attemptRequest();
+        }
+
+        const maxRetries = retry?.number ?? 0;
+        let retried = 0;
+        let current: Reqor.Response | undefined;
+        let lastError: any;
+        let delay = retry?.delay?.number ?? 0;
+
+        const retryLoop = (async () => {
+            while (retried <= maxRetries) {
+                try {
+                    if (timeout) {
+                        const controller = new AbortController();
+                        const timer = setTimeout(() => {
+                            controller.abort();
+                            timeout.onTimeout?.(retried);
+                        }, timeout.time);
+
+                        try {
+                            current = await attemptRequest(controller.signal) as Reqor.Response;
+                        } finally {
+                            clearTimeout(timer);
+                        }
+                    } else {
+                        current = await attemptRequest() as Reqor.Response;
+                    }
+
+                    if (current?.ok) break;
+                } catch (err) {
+                    lastError = err;
+                }
+
+                retried++;
+                if (retried <= maxRetries) {
+                    const increaseFn = retry?.delay?.increaseFn;
+                    if (increaseFn) {
+                        delay = increaseFn(delay);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    retry?.onRetry?.(retried);
+                }
+            }
+
+            if (!current?.ok) {
+                throw lastError ?? new Reqor.Error("Failed after retries", sub);
+            }
+            return current;
+        })();
+
+        if (totalTimeout) {
+            const timeoutPromise = new Promise<never>((_, reject) => {
+                setTimeout(() => {
+                    totalTimeout.onTimeout?.();
+                    reject(new Reqor.Error("Total timeout exceeded", sub));
+                }, totalTimeout.time);
+            });
+
+            return Promise.race([retryLoop, timeoutPromise]);
+        }
+
+        return retryLoop;
+    }
+
+    async #get({
+        signal,
+        url,
+        localMiddleware,
+    }: {
+        signal?: AbortSignal;
+        url?: string;
+        localMiddleware?: ReqorMiddleware[];
+    } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
+        return this.#dispatchRequest({
+            signal,
+            url,
+            init: { method: "GET" },
+            sub: "Reqor.get",
+            localMiddlewares: localMiddleware,
+        });
     }
 
     #resolveFetch(): ((input: string, init?: RequestInit) => Promise<globalThis.Response>) | undefined {
@@ -166,7 +438,9 @@ class Reqor {
         activateAfter: number,
         signal?: AbortSignal,
         requestInit: RequestInit = { method: "GET" },
-        sub: "Reqor.get" | "Reqor.post" = "Reqor.get",
+        sub: ReqorSub = "Reqor.get",
+        middlewareContext?: ReqorMiddlewareContext,
+        localMiddlewares?: ReqorMiddleware[],
     ): Promise<Reqor.ResponseLater> {
         if (activateAfter < 0) {
             throw new Reqor.Error(
@@ -301,7 +575,10 @@ class Reqor {
                     finalizeResolve();
                     return;
                 }
-                finalizeReject(err);
+                const finalError = middlewareContext
+                    ? await this.#applyErrorMiddlewares(err, middlewareContext, localMiddlewares)
+                    : err;
+                finalizeReject(finalError);
             }
         }, activateAfter);
 
@@ -382,111 +659,29 @@ class Reqor {
         return this;
     }
 
-    async get({
-        retry,
-        timeout,
-        totalTimeout,
-        params,
-    }: {
-        retry?: {
-            number: number;
-            delay?: {
-                number: number;
-                increaseFn?: (current: number) => number;
-            };
-            onRetry?: (retryNumber?: number) => any;
-        };
-        timeout?: {
-            onTimeout?: (retryNumber?: number) => any;
-            time: number;
-        };
-        totalTimeout?: {
-            time: number;
-            onTimeout?: () => any;
-        };
-        params?: { [key: string]: string | number | boolean | null | undefined }[]
-    } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
+    async get(optionsOrMiddleware?: ReqorGetOptions | ReqorLocalMiddlewareInput): Promise<Reqor.Response | Reqor.ResponseLater> {
+        const {
+            retry,
+            timeout,
+            totalTimeout,
+            params,
+            middleware,
+        } = normalizeGetOptions(optionsOrMiddleware);
         const effectiveRetry = retry ?? this.#retryConfig;
         const effectiveTimeout = timeout ?? this.#timeoutConfig;
         const effectiveTotalTimeout = totalTimeout ?? this.#totalTimeoutConfig;
         const requestUrl = this.#buildUrl(params);
+        const localMiddlewares = normalizeLocalMiddleware(middleware);
 
-        if (this.#after !== undefined) {
-            if (effectiveTimeout) {
-                const controller = new AbortController();
-                const timer = setTimeout(() => {
-                    controller.abort();
-                    effectiveTimeout.onTimeout?.(0);
-                }, effectiveTimeout.time);
-                try {
-                    return await this.#get({ signal: controller.signal, url: requestUrl });
-                } finally {
-                    clearTimeout(timer);
-                }
-            }
-            return this.#get({ url: requestUrl });
-        }
-
-        const maxRetries = effectiveRetry?.number ?? 0;
-
-        let retried = 0;
-        let current: Reqor.Response | undefined;
-        let lastError: any;
-        let delay = effectiveRetry?.delay?.number ?? 0;
-
-        const retryLoop = (async () => {
-            while (retried <= maxRetries) {
-                try {
-                    if (effectiveTimeout) {
-                        const controller = new AbortController();
-                        const timer = setTimeout(() => {
-                            controller.abort();
-                            effectiveTimeout.onTimeout?.(retried);
-                        }, effectiveTimeout.time);
-
-                        try {
-                            current = await this.#get({ signal: controller.signal, url: requestUrl }) as Reqor.Response;
-                        } finally {
-                            clearTimeout(timer);
-                        }
-                    } else {
-                        current = await this.#get({ url: requestUrl }) as Reqor.Response;
-                    }
-
-                    if (current?.ok) break;
-                } catch (err) {
-                    lastError = err;
-                }
-
-                retried++;
-                if (retried <= maxRetries) {
-                    const increaseFn = effectiveRetry?.delay?.increaseFn;
-                    if (increaseFn) {
-                        delay = increaseFn(delay);
-                    }
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    effectiveRetry?.onRetry?.(retried);
-                }
-            }
-
-            if (!current?.ok) {
-                throw lastError ?? new Reqor.Error("Failed after retries", "Reqor.get");
-            }
-            return current;
-        })();
-
-        if (effectiveTotalTimeout) {
-            const timeoutPromise = new Promise<never>((_, reject) => {
-                setTimeout(() => {
-                    effectiveTotalTimeout.onTimeout?.();
-                    reject(new Reqor.Error("Total timeout exceeded", "Reqor.get"));
-                }, effectiveTotalTimeout.time);
-            });
-
-            return Promise.race([retryLoop, timeoutPromise]);
-        }
-
-        return retryLoop;
+        return this.#executeWithPolicies(
+            {
+                retry: effectiveRetry,
+                timeout: effectiveTimeout,
+                totalTimeout: effectiveTotalTimeout,
+            },
+            "Reqor.get",
+            (signal?: AbortSignal) => this.#get({ signal, url: requestUrl, localMiddleware: localMiddlewares }),
+        );
     }
     //#endregion
     //#region POST
@@ -551,136 +746,54 @@ class Reqor {
         signal,
         url,
         data,
+        localMiddleware,
     }: {
         signal?: AbortSignal;
         url?: string;
         data?: any;
+        localMiddleware?: ReqorMiddleware[];
     } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
-        const requestUrl = url ?? this.#buildUrl();
         const effectiveData = data ?? this.#_data;
         const payload = this.#preparePostBody(effectiveData);
-        const requestInit: RequestInit = {
-            method: "POST",
+        return this.#dispatchRequest({
             signal,
-            body: payload.body,
-            headers: payload.headers,
-        };
-
-        if (this.#after !== undefined) {
-            return this.#scheduleFetchLater(requestUrl, this.#after, signal, requestInit, "Reqor.post");
-        }
-
-        const a = await this.#requestViaFetch(requestUrl, requestInit, "Reqor.post");
-        return this.#toReqorResponse(a);
+            url,
+            init: {
+                method: "POST",
+                body: payload.body,
+                headers: payload.headers,
+            },
+            sub: "Reqor.post",
+            localMiddlewares: localMiddleware,
+        });
     }
 
     async post(
         data?: any,
-        {
+        optionsOrMiddleware: ReqorPostOptions | ReqorLocalMiddlewareInput = {},
+    ): Promise<Reqor.Response | Reqor.ResponseLater> {
+        const {
             retry,
             timeout,
             totalTimeout,
             params,
-        }: {
-            retry?: {
-                number: number;
-                delay?: {
-                    number: number;
-                    increaseFn?: (current: number) => number;
-                };
-                onRetry?: (retryNumber?: number) => any;
-            };
-            timeout?: {
-                onTimeout?: (retryNumber?: number) => any;
-                time: number;
-            };
-            totalTimeout?: {
-                time: number;
-                onTimeout?: () => any;
-            };
-            params?: { [key: string]: string | number | boolean | null | undefined }[];
-        } = {},
-    ): Promise<Reqor.Response | Reqor.ResponseLater> {
+            middleware,
+        } = normalizePostOptions(optionsOrMiddleware);
         const effectiveRetry = retry ?? this.#retryConfig;
         const effectiveTimeout = timeout ?? this.#timeoutConfig;
         const effectiveTotalTimeout = totalTimeout ?? this.#totalTimeoutConfig;
         const requestUrl = this.#buildUrl(params);
+        const localMiddlewares = normalizeLocalMiddleware(middleware);
 
-        if (this.#after !== undefined) {
-            if (effectiveTimeout) {
-                const controller = new AbortController();
-                const timer = setTimeout(() => {
-                    controller.abort();
-                    effectiveTimeout.onTimeout?.(0);
-                }, effectiveTimeout.time);
-                try {
-                    return await this.#post({ signal: controller.signal, url: requestUrl, data });
-                } finally {
-                    clearTimeout(timer);
-                }
-            }
-            return this.#post({ url: requestUrl, data });
-        }
-
-        const maxRetries = effectiveRetry?.number ?? 0;
-        let retried = 0;
-        let current: Reqor.Response | undefined;
-        let lastError: any;
-        let delay = effectiveRetry?.delay?.number ?? 0;
-
-        const retryLoop = (async () => {
-            while (retried <= maxRetries) {
-                try {
-                    if (effectiveTimeout) {
-                        const controller = new AbortController();
-                        const timer = setTimeout(() => {
-                            controller.abort();
-                            effectiveTimeout.onTimeout?.(retried);
-                        }, effectiveTimeout.time);
-
-                        try {
-                            current = await this.#post({ signal: controller.signal, url: requestUrl, data }) as Reqor.Response;
-                        } finally {
-                            clearTimeout(timer);
-                        }
-                    } else {
-                        current = await this.#post({ url: requestUrl, data }) as Reqor.Response;
-                    }
-
-                    if (current?.ok) break;
-                } catch (err) {
-                    lastError = err;
-                }
-
-                retried++;
-                if (retried <= maxRetries) {
-                    const increaseFn = effectiveRetry?.delay?.increaseFn;
-                    if (increaseFn) {
-                        delay = increaseFn(delay);
-                    }
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    effectiveRetry?.onRetry?.(retried);
-                }
-            }
-
-            if (!current?.ok) {
-                throw lastError ?? new Reqor.Error("Failed after retries", "Reqor.post");
-            }
-            return current;
-        })();
-
-        if (effectiveTotalTimeout) {
-            const timeoutPromise = new Promise<never>((_, reject) => {
-                setTimeout(() => {
-                    effectiveTotalTimeout.onTimeout?.();
-                    reject(new Reqor.Error("Total timeout exceeded", "Reqor.post"));
-                }, effectiveTotalTimeout.time);
-            });
-
-            return Promise.race([retryLoop, timeoutPromise]);
-        }
-
-        return retryLoop;
+        return this.#executeWithPolicies(
+            {
+                retry: effectiveRetry,
+                timeout: effectiveTimeout,
+                totalTimeout: effectiveTotalTimeout,
+            },
+            "Reqor.post",
+            (signal?: AbortSignal) => this.#post({ signal, url: requestUrl, data, localMiddleware: localMiddlewares }),
+        );
     }
 
     #identifyData(data: any) {
@@ -1896,13 +2009,32 @@ namespace Reqor.Headers.HTTPHeaders.ContentType {
     export type validBases = (typeof validBases)[number];
 }
 
+
+function req(url: string) {
+    if (!JSTC.for([url]).check(["checkurl"]))
+        throw new Reqor.Error("Invalid URL");
+    return new Reqor(url);
+}
 /**
  * Create a new reqor class using a easy function way (ClassWrapperFunction())
  * @param url
  * @returns
  */
-export default function reqor(url: string) {
-    if (!JSTC.for([url]).check(["checkurl"]))
-        throw new Reqor.Error("Invalid URL");
-    return new Reqor(url);
-}
+const reqor = new Proxy(req, {
+    get(target, prop, reciever) {
+        if (prop === "use") {
+            return (middleware: ReqorMiddleware) => {
+                Reqor.use(middleware);
+                return reciever;
+            };
+        }
+        if (prop === "clearMiddlewares") {
+            return () => {
+                Reqor.clearMiddlewares();
+                return reciever;
+            };
+        }
+        return Reflect.get(target, prop, reciever);
+    },
+})
+export default reqor
