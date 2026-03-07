@@ -8,3 +8,7 @@ SECURITY.md
 tsconfig.json
 src
 .github
+dist/test.js
+dist/test.d.ts
+dist/bruh.js
+dist/bruh.d.ts
