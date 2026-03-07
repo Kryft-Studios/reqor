@@ -1,6 +1,6 @@
 {
   "name": "@briklab/reqor",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "description": "A tiny wrapper for the web's fetch and websockets.",
   "main": "./dist/index.js",
   "type": "module",
