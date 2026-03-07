@@ -1912,12 +1912,11 @@ namespace Reqor.Headers.HTTPHeaders {
     }
 
     get array(): MIME[] {
-      return this._value.split(",").map((str) => {
-        const [base, subtype] = str.trim().split("/");
-        return new MIME(this._h, this._key)
-          .base(base ?? "text")
-          .subtype(subtype ?? "plain");
-      });
+      return this._value
+        .split(",")
+        .map((str) => str.trim())
+        .filter(Boolean)
+        .map((str) => new MIME(new globalThis.Headers({ [this._key]: str }), this._key, str));
     }
 
     set(val: string | string[] | MIME[]) {
@@ -2082,9 +2081,6 @@ namespace Reqor.Headers.HTTPHeaders {
           .filter((v) => Number.isFinite(v));
       } else {
         this.#items = defaultVals.filter((v) => Number.isFinite(v));
-        if (this.#items.length > 0) {
-          this.#h.set(this.#key, this.toString());
-        }
       }
     }
 
@@ -2185,9 +2181,7 @@ namespace Reqor.Headers.HTTPHeaders {
       } else {
         this.#items = defaultVals;
       }
-      if (this.#items.length > 0) {
-        this.#h.set(this.#key, this.#items.join(","));
-      }
+      // Keep constructor read-only so helpers are safe on immutable response headers.
     }
 
     add(str: string) {
@@ -2280,7 +2274,6 @@ namespace Reqor.Headers.HTTPHeaders {
       this.#items = defaultVals.map(
         (val) => new VALID_STRING(h, key, val, validStrings),
       );
-      this.#h.set(this.#key, this.#items.map((i) => i.toString()).join(","));
     }
 
     add(str: string) {
