@@ -981,11 +981,11 @@ class Reqor {
     this.#__headers = headers
   }
   // prepare bost body
-  #preparePostBody(data: any, headers: Reqor.Headers): { body?: BodyInit; headers?: HeadersInit } {
+  #preparePostBody(data: any, headers: Reqor.Headers.Map): { body?: BodyInit; headers?: HeadersInit } {
     if (data == null) return {};
 
     if (typeof FormData !== "undefined" && data instanceof FormData) {
-      return { body: data };
+      return { body: data, headers:headers.getOriginalClass() };
     }
     if (
       typeof URLSearchParams !== "undefined" &&
@@ -995,43 +995,44 @@ class Reqor {
         body: data,
         headers: {
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          ...headers.getOriginalClass() 
         },
       };
     }
     if (typeof Blob !== "undefined" && data instanceof Blob) {
       return {
         body: data,
-        headers: data.type ? { "Content-Type": data.type } : undefined,
+        headers: data.type ? { "Content-Type": data.type,...headers.getOriginalClass()  } : undefined,
       };
     }
     if (data instanceof ArrayBuffer) {
       return {
         body: data as unknown as BodyInit,
-        headers: { "Content-Type": "application/octet-stream" },
+        headers: { "Content-Type": "application/octet-stream",...headers.getOriginalClass()  },
       };
     }
     if (ArrayBuffer.isView(data)) {
       const view = data as ArrayBufferView;
       return {
         body: view as unknown as BodyInit,
-        headers: { "Content-Type": "application/octet-stream" },
+        headers: { "Content-Type": "application/octet-stream",...headers.getOriginalClass()  },
       };
     }
     if (typeof data === "string") {
       return {
         body: data,
-        headers: { "Content-Type": this.#identifyData(data) },
+        headers: { "Content-Type": this.#identifyData(data),...headers.getOriginalClass()  },
       };
     }
     if (typeof data === "object") {
       return {
         body: JSON.stringify(data),
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json",...headers.getOriginalClass()  },
       };
     }
     return {
       body: String(data),
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/plain",...headers.getOriginalClass()  },
     };
   }
 
@@ -1218,7 +1219,8 @@ namespace Reqor {
       h.getContentType = () =>
         original.get("content-type") || original.get("Content-Type");
       h.add = h.new;
-      h.http = Reqor.Headers.HTTPHeaders.create(original);
+      h.getHeadersClass = () =>  original
+       h.http = Reqor.Headers.HTTPHeaders.create(original);
       h[Symbol.iterator] = original.entries.bind(original);
       h[Symbol.asyncIterator] = async function* () {
         for (const entry of original.entries()) yield entry;
