@@ -127,6 +127,14 @@ type ReqorGetOptions = {
 };
 type ReqorPostOptions = ReqorGetOptions;
 
+function isReqorHeaders(value: unknown): value is Reqor.Headers.Map {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as Reqor.Headers.Map).getHeadersClass === "function"
+  );
+}
+
 function isReqorMiddleware(value: unknown): value is ReqorMiddleware {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
@@ -952,7 +960,7 @@ class Reqor {
   //#region POST
   #_data: any;
   #cachedCt: undefined | string;
- #__headers:any;
+  #__headers: Reqor.Headers.Map = new Reqor.Headers(new Headers());
   /**
    * A function to decide what data gets passed to `post`
    *
@@ -977,15 +985,31 @@ class Reqor {
    * 
    * **`Important`**: This is only exclusive for `post`
    */
-  headers(headers: Reqor.Headers){
-    this.#__headers = headers
+  headers(headers: Reqor.Headers.Map) {
+    this.#__headers = headers;
+    return this;
   }
   // prepare bost body
-  #preparePostBody(data: any, headers: Reqor.Headers.Map): { body?: BodyInit; headers?: HeadersInit } {
-    if (data == null) return {};
+  #preparePostBody(
+    data: any,
+    headers: Reqor.Headers.Map,
+  ): { body?: BodyInit; headers?: HeadersInit } {
+    const buildHeaders = (contentType?: string): Headers => {
+      const source =
+        typeof headers.getHeadersClass === "function"
+          ? headers.getHeadersClass()
+          : undefined;
+      const merged = new Headers(source);
+      if (contentType) {
+        merged.set("Content-Type", contentType);
+      }
+      return merged;
+    };
+
+    if (data == null) return { headers: buildHeaders() };
 
     if (typeof FormData !== "undefined" && data instanceof FormData) {
-      return { body: data, headers:headers.getOriginalClass() };
+      return { body: data, headers: buildHeaders() };
     }
     if (
       typeof URLSearchParams !== "undefined" &&
@@ -993,46 +1017,45 @@ class Reqor {
     ) {
       return {
         body: data,
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          ...headers.getOriginalClass() 
-        },
+        headers: buildHeaders(
+          "application/x-www-form-urlencoded;charset=UTF-8",
+        ),
       };
     }
     if (typeof Blob !== "undefined" && data instanceof Blob) {
       return {
         body: data,
-        headers: data.type ? { "Content-Type": data.type,...headers.getOriginalClass()  } : undefined,
+        headers: buildHeaders(data.type || undefined),
       };
     }
     if (data instanceof ArrayBuffer) {
       return {
         body: data as unknown as BodyInit,
-        headers: { "Content-Type": "application/octet-stream",...headers.getOriginalClass()  },
+        headers: buildHeaders("application/octet-stream"),
       };
     }
     if (ArrayBuffer.isView(data)) {
       const view = data as ArrayBufferView;
       return {
         body: view as unknown as BodyInit,
-        headers: { "Content-Type": "application/octet-stream",...headers.getOriginalClass()  },
+        headers: buildHeaders("application/octet-stream"),
       };
     }
     if (typeof data === "string") {
       return {
         body: data,
-        headers: { "Content-Type": this.#identifyData(data),...headers.getOriginalClass()  },
+        headers: buildHeaders(this.#identifyData(data)),
       };
     }
     if (typeof data === "object") {
       return {
         body: JSON.stringify(data),
-        headers: { "Content-Type": "application/json",...headers.getOriginalClass()  },
+        headers: buildHeaders("application/json"),
       };
     }
     return {
       body: String(data),
-      headers: { "Content-Type": "text/plain",...headers.getOriginalClass()  },
+      headers: buildHeaders("text/plain"),
     };
   }
 
@@ -1046,12 +1069,12 @@ class Reqor {
     signal?: AbortSignal;
     url?: string;
     data?: any;
-    headers?:any;
+    headers?: Reqor.Headers.Map;
     localMiddleware?: ReqorMiddleware[];
   } = {}): Promise<Reqor.Response | Reqor.ResponseLater> {
     const effectiveData = data ?? this.#_data;
-    const effectiveHeaders = headers ?? this.#__headers
-    const payload = this.#preparePostBody(effectiveData,effectiveHeaders);
+    const effectiveHeaders = headers ?? this.#__headers;
+    const payload = this.#preparePostBody(effectiveData, effectiveHeaders);
     return this.#dispatchRequest({
       signal,
       url,
@@ -1067,11 +1090,20 @@ class Reqor {
 
   async post(
     data?: any,
-    headers?: Reqor.Headers,
+    headersOrOptions?:
+      | Reqor.Headers.Map
+      | ReqorPostOptions
+      | ReqorLocalMiddlewareInput,
     optionsOrMiddleware: ReqorPostOptions | ReqorLocalMiddlewareInput = {},
   ): Promise<Reqor.Response | Reqor.ResponseLater> {
+    const hasHeaders = isReqorHeaders(headersOrOptions);
+    const resolvedHeaders = hasHeaders ? headersOrOptions : undefined;
+    const resolvedOptions = hasHeaders
+      ? optionsOrMiddleware
+      : headersOrOptions ?? optionsOrMiddleware;
+
     const { retry, timeout, totalTimeout, params, middleware } =
-      normalizePostOptions(optionsOrMiddleware);
+      normalizePostOptions(resolvedOptions);
     const effectiveRetry = retry ?? this.#retryConfig;
     const effectiveTimeout = timeout ?? this.#timeoutConfig;
     const effectiveTotalTimeout = totalTimeout ?? this.#totalTimeoutConfig;
@@ -1090,7 +1122,7 @@ class Reqor {
           signal,
           url: requestUrl,
           data,
-          headers,
+          headers: resolvedHeaders,
           localMiddleware: localMiddlewares,
         }),
     );
@@ -1351,6 +1383,7 @@ namespace Reqor {
       "error",
       "opaque",
       "opaqueredirect",
+      "default",
     ] as const;
 
     constructor(type: string) {
